@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# Kokoro TTS model files (large, download via setup.sh)
+*.onnx
+*.bin
+
+# Input files
+*.epub
+
+# Output directories
+audiobook/
+test/
+
+# Cache / temp
+.cache/
+
+# Misc
+=1.17.0
