@@ -1,18 +1,30 @@
-"""HTML → TTS-friendly plain text.
+"""HTML → TTS-friendly plain text with section markers for M4B chapter markers.
 
 Transforms raw chapter HTML into clean text optimized for text-to-speech,
 replacing code blocks, figures, and math with numbered references to the
-companion PDF.
+companion PDF. Returns section markers with char offsets for M4B assembly.
 """
 
 import html
+import json
 import logging
 import re
 import warnings
+from dataclasses import dataclass
+from pathlib import Path
 
 from bs4 import BeautifulSoup, NavigableString, Tag
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class SectionMarker:
+    """A heading position in the cleaned text, used for M4B chapter markers."""
+    title: str
+    level: int           # 1=h1, 2=h2, 3=h3
+    char_offset: int     # Position in the cleaned text string
+
 
 # Acronyms that should be spelled out letter by letter for TTS
 ACRONYMS = {
@@ -82,11 +94,30 @@ ABBREVIATIONS = {
 }
 
 
-def clean_chapter(raw_html: str) -> str:
+def _load_pronunciation(pronunciation_file: str) -> dict[str, str]:
+    """Load custom pronunciation dictionary from JSON file."""
+    path = Path(pronunciation_file)
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text())
+        # Support both flat dict and {"terms": {...}} format
+        if "terms" in data:
+            return data["terms"]
+        return data
+    except (json.JSONDecodeError, KeyError) as e:
+        logger.warning(f"Failed to load pronunciation file {path}: {e}")
+        return {}
+
+
+def clean_chapter(
+    raw_html: str,
+    pronunciation_file: str = "pronunciation.json",
+) -> tuple[str, list[SectionMarker]]:
     """Convert chapter HTML to TTS-friendly plain text.
 
-    Code blocks, figures, and math are replaced with numbered references
-    that correspond to the companion PDF.
+    Returns:
+        tuple of (cleaned text, list of SectionMarker with char offsets)
     """
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", category=UserWarning)
@@ -108,14 +139,12 @@ def clean_chapter(raw_html: str) -> str:
         tag.decompose()
 
     # Remove footnote reference markers (superscript numbers)
-    # We'll inline the footnote text instead
     for sup in body.find_all("sup"):
         a_tag = sup.find("a")
         if a_tag and a_tag.get("data-type") == "noteref":
             sup.decompose()
 
     # --- Phase 2: Replace structured elements in document order ---
-    # We must process these in DOM order so numbering is sequential
 
     code_counter = 0
     math_counter = 0
@@ -141,7 +170,6 @@ def clean_chapter(raw_html: str) -> str:
 
     # Process equation divs that may wrap math
     for eq_div in body.find_all("div", attrs={"data-type": "equation"}):
-        # If it still contains text (math already replaced above), keep it
         text = eq_div.get_text(strip=True)
         if text:
             eq_div.replace_with(NavigableString(f"\n\n{text}\n\n"))
@@ -154,7 +182,6 @@ def clean_chapter(raw_html: str) -> str:
         caption = ""
         alt = ""
 
-        # Get label from <span class="label">
         h6 = fig.find("h6")
         if h6:
             label_span = h6.find("span", class_="label")
@@ -171,7 +198,6 @@ def clean_chapter(raw_html: str) -> str:
         if not label:
             label = "a figure"
 
-        # Build replacement text
         parts = [f"\n\nSee {label} in the companion PDF"]
         desc = caption or alt
         if desc:
@@ -194,7 +220,6 @@ def clean_chapter(raw_html: str) -> str:
                     label_span.get_text(strip=True), "", 1
                 ).strip()
 
-        # Count rows to decide read-aloud vs reference
         rows = table.find_all("tr")
         if len(rows) <= 6:
             # Small table: read as text
@@ -237,7 +262,6 @@ def clean_chapter(raw_html: str) -> str:
     # Process notes, tips, warnings
     for note_type in ["note", "tip", "warning"]:
         for div in body.find_all("div", attrs={"data-type": note_type}):
-            # Remove the <h6> header (e.g., "Tip", "Note")
             h6 = div.find("h6")
             if h6:
                 h6.decompose()
@@ -262,7 +286,6 @@ def clean_chapter(raw_html: str) -> str:
     for fn_div in body.find_all("div", attrs={"data-type": "footnotes"}):
         parts = ["\n\n"]
         for fn_p in fn_div.find_all("p", attrs={"data-type": "footnote"}):
-            # Remove superscript number
             for sup in fn_p.find_all("sup"):
                 sup.decompose()
             text = fn_p.get_text(strip=True)
@@ -272,6 +295,14 @@ def clean_chapter(raw_html: str) -> str:
         fn_div.replace_with(NavigableString("".join(parts)))
 
     # --- Phase 3: Process headings for natural pauses ---
+    # Collect heading info BEFORE replacing, so we can build section markers later
+
+    heading_texts = []  # (tag_name, text) in DOM order
+    for heading_name in ["h1", "h2", "h3"]:
+        for h_tag in body.find_all(heading_name):
+            text = h_tag.get_text(strip=True)
+            if text:
+                heading_texts.append((heading_name, text))
 
     for h1 in body.find_all("h1"):
         text = h1.get_text(strip=True)
@@ -285,22 +316,18 @@ def clean_chapter(raw_html: str) -> str:
         text = h3.get_text(strip=True)
         h3.replace_with(NavigableString(f"\n\n{text}.\n\n"))
 
-    # h6 remaining (not inside figures/tables, already processed)
     for h6 in body.find_all("h6"):
         text = h6.get_text(strip=True)
         h6.replace_with(NavigableString(f"\n{text}\n"))
 
     # --- Phase 4: Handle inline elements ---
 
-    # Strip inline <code> tags but keep text
     for code in body.find_all("code"):
         code.replace_with(NavigableString(code.get_text()))
 
-    # Strip links but keep text
     for a in body.find_all("a"):
         a.replace_with(NavigableString(a.get_text()))
 
-    # Strip emphasis/strong but keep text
     for tag_name in ["em", "strong", "b", "i", "span"]:
         for tag in body.find_all(tag_name):
             tag.replace_with(NavigableString(tag.get_text()))
@@ -309,12 +336,37 @@ def clean_chapter(raw_html: str) -> str:
     text = body.get_text()
 
     # --- Phase 6: Post-processing ---
-    text = _post_process(text)
+    pronunciation = _load_pronunciation(pronunciation_file)
+    text = _post_process(text, pronunciation)
 
-    return text
+    # --- Build section markers with char offsets ---
+    section_markers = _build_section_markers(text, heading_texts)
+
+    return text, section_markers
 
 
-def _post_process(text: str) -> str:
+def _build_section_markers(text: str, heading_texts: list[tuple[str, str]]) -> list[SectionMarker]:
+    """Find heading positions in the cleaned text to build section markers."""
+    markers = []
+    search_start = 0
+
+    for tag_name, heading_text in heading_texts:
+        level = int(tag_name[1])
+        # The heading was replaced with "{text}." — search for that pattern
+        search_text = f"{heading_text}."
+        idx = text.find(search_text, search_start)
+        if idx >= 0:
+            markers.append(SectionMarker(
+                title=heading_text,
+                level=level,
+                char_offset=idx,
+            ))
+            search_start = idx + len(search_text)
+
+    return markers
+
+
+def _post_process(text: str, pronunciation: dict[str, str] | None = None) -> str:
     """Clean up and normalize text for TTS."""
 
     # Decode any remaining HTML entities
@@ -324,6 +376,16 @@ def _post_process(text: str) -> str:
     for abbr, expansion in ABBREVIATIONS.items():
         text = text.replace(abbr, expansion)
 
+    # Apply custom pronunciation dictionary
+    if pronunciation:
+        for term, phonetic in pronunciation.items():
+            text = re.sub(
+                rf'\b{re.escape(term)}\b',
+                phonetic,
+                text,
+                flags=re.IGNORECASE,
+            )
+
     # Expand acronyms (whole word only)
     for acronym, expansion in ACRONYMS.items():
         text = re.sub(
@@ -332,14 +394,13 @@ def _post_process(text: str) -> str:
             text,
         )
 
-    # Handle versioned model names: "GPT-4" already handled by acronym expansion
-    # but handle patterns like "GPT-4o", "GPT-3.5"
+    # Handle versioned model names
     text = re.sub(r'\bG P T-(\d\w*)\b', r'G P T \1', text)
 
-    # Remove long URLs (anything with http:// or https://)
+    # Remove long URLs
     text = re.sub(r'https?://\S+', '', text)
 
-    # Clean up figure cross-references: "(see Figure 3-1)" → "as shown in Figure 3-1"
+    # Clean up figure cross-references
     text = re.sub(
         r'\(see (Figure \d+-\d+)\)',
         r', as shown in \1 in the companion PDF,',
@@ -347,7 +408,7 @@ def _post_process(text: str) -> str:
         flags=re.IGNORECASE,
     )
 
-    # Clean up table cross-references similarly
+    # Clean up table cross-references
     text = re.sub(
         r'\(see (Table \d+-\d+)\)',
         r', as shown in \1,',
@@ -359,20 +420,19 @@ def _post_process(text: str) -> str:
     text = text.replace("—", " — ")
     text = text.replace("–", " — ")
 
-    # Remove backticks (from any remaining inline code)
+    # Remove backticks
     text = text.replace("`", "")
 
     # Normalize whitespace: collapse multiple spaces
     text = re.sub(r'[ \t]+', ' ', text)
 
-    # Normalize newlines: collapse 3+ into 2 (paragraph separator)
+    # Normalize newlines: collapse 3+ into 2
     text = re.sub(r'\n{3,}', '\n\n', text)
 
     # Remove leading/trailing whitespace per line
     lines = [line.strip() for line in text.split('\n')]
     text = '\n'.join(lines)
 
-    # Remove leading/trailing whitespace
     text = text.strip()
 
     return text

@@ -78,10 +78,12 @@ def upload_to_drive(config):
     root_id = _find_or_create_folder(service, config.gdrive_folder)
     book_id = _find_or_create_folder(service, config.book_title, root_id)
 
-    # Upload all MP3s and PDFs
+    # Upload all audio files, companions, and metadata
     upload_files = (
         list(config.audio_dir.glob("*.mp3"))
+        + list(config.output_dir.glob("*.m4b"))
         + list(config.companions_dir.glob("*.pdf"))
+        + list(config.companions_dir.glob("*.html"))
     )
 
     # Also upload manifest and cover
@@ -93,11 +95,15 @@ def upload_to_drive(config):
         upload_files.append(cover)
 
     for file_path in upload_files:
-        mime = "audio/mpeg" if file_path.suffix == ".mp3" else "application/pdf"
-        if file_path.suffix == ".json":
-            mime = "application/json"
-        if file_path.suffix == ".png":
-            mime = "image/png"
+        mime_map = {
+            ".mp3": "audio/mpeg",
+            ".m4b": "audio/mp4",
+            ".pdf": "application/pdf",
+            ".html": "text/html",
+            ".json": "application/json",
+            ".png": "image/png",
+        }
+        mime = mime_map.get(file_path.suffix, "application/octet-stream")
 
         media = MediaFileUpload(str(file_path), mimetype=mime, resumable=True)
         metadata = {"name": file_path.name, "parents": [book_id]}

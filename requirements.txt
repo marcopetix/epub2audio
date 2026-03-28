@@ -1,3 +1,4 @@
+# Core
 beautifulsoup4>=4.12
 lxml>=5.0
 kokoro-onnx>=0.4.0
@@ -9,8 +10,20 @@ tqdm>=4.66.0
 numpy>=1.24.0
 Pillow>=10.0.0
 matplotlib>=3.8.0
+
+# LLM enrichment (Ollama HTTP API)
+requests>=2.31.0
+textstat>=0.7.0
+
+# Syntax highlighting (companion PDF/HTML)
+pygments>=2.17.0
+
 # GPU acceleration (NVIDIA):
 # onnxruntime-gpu>=1.17.0
+
+# Quality check with Whisper (optional):
+# faster-whisper>=1.0.0
+
 # Google Drive upload (optional):
 # google-api-python-client>=2.100.0
 # google-auth-oauthlib>=1.1.0

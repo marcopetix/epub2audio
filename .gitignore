@@ -13,9 +13,20 @@ __pycache__/
 # Output directories
 audiobook/
 test/
+test_v2/
+
+# LLM cache
+.llm_cache/
 
 # Cache / temp
 .cache/
+
+# Credentials
+credentials.json
+token.pickle
+
+# Claude Code internal state
+.claude/
 
 # Misc
 =1.17.0

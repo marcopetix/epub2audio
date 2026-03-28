@@ -1,4 +1,4 @@
-"""EPUB → structured Chapter objects with figures, code blocks, and math formulas."""
+"""EPUB → structured Chapter objects with figures, code blocks, math formulas, tables, and sections."""
 
 import logging
 import re
@@ -6,6 +6,7 @@ import warnings
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
+from xml.etree import ElementTree
 
 from bs4 import BeautifulSoup, Tag
 
@@ -29,6 +30,7 @@ class CodeBlock:
     language: str         # From data-code-language attribute, "" if unknown
     code: str             # Raw text content (tags stripped)
     context: str          # Last heading before this code block
+    annotation: str = ""  # LLM-generated description (filled by llm_enricher)
     dom_position: int = 0 # Position in DOM order among all visual elements
 
 
@@ -42,6 +44,28 @@ class MathFormula:
 
 
 @dataclass
+class Table:
+    number: int           # Sequential within chapter (1-based)
+    label: str            # "Table 1-1" if labeled
+    caption: str          # Caption text
+    html: str             # Raw HTML of the table
+    headers: list[str] = field(default_factory=list)
+    rows: list[list[str]] = field(default_factory=list)
+    row_count: int = 0
+    col_count: int = 0
+    context: str = ""     # Last heading before this table
+    narration: str = ""   # LLM-generated narration (filled by llm_enricher)
+    dom_position: int = 0
+
+
+@dataclass
+class Section:
+    level: int            # 1=h1, 2=h2, 3=h3
+    title: str
+    dom_position: int = 0
+
+
+@dataclass
 class Chapter:
     number: int           # 1-based
     filename: str         # "ch01.html"
@@ -50,7 +74,11 @@ class Chapter:
     figures: list[Figure] = field(default_factory=list)
     code_blocks: list[CodeBlock] = field(default_factory=list)
     math_formulas: list[MathFormula] = field(default_factory=list)
+    tables: list[Table] = field(default_factory=list)
+    sections: list[Section] = field(default_factory=list)
     images: dict[str, bytes] = field(default_factory=dict)  # src -> image data
+    intro: str = ""       # LLM-generated intro (filled by llm_enricher)
+    figure_descriptions: dict[int, str] = field(default_factory=dict)  # fig_number -> description
 
 
 def _get_current_heading(tag: Tag) -> str:
@@ -62,23 +90,84 @@ def _get_current_heading(tag: Tag) -> str:
     return ""
 
 
-def _extract_all_elements(soup: BeautifulSoup) -> tuple[list[Figure], list[CodeBlock], list[MathFormula]]:
-    """Extract figures, code blocks, and math formulas in DOM order.
+def _extract_table(element: Tag, counter: int, context: str, dom_pos: int) -> Table:
+    """Extract structured data from a <table> element."""
+    # Find label/caption
+    label = ""
+    caption = ""
+    caption_el = element.find("caption")
+    if caption_el:
+        label_span = caption_el.find("span", class_="label")
+        if label_span:
+            label = label_span.get_text(strip=True).rstrip(". ")
+        caption = caption_el.get_text(strip=True)
+        if label_span:
+            caption = caption.replace(label_span.get_text(strip=True), "", 1).strip()
 
-    Each element gets a dom_position tracking its order relative to all
-    other visual elements in the chapter.
-    """
+    if not label:
+        label = f"Table {counter}"
+
+    # Extract headers
+    headers = []
+    thead = element.find("thead")
+    if thead:
+        for th in thead.find_all(["th", "td"]):
+            headers.append(th.get_text(strip=True))
+
+    # Extract rows
+    rows = []
+    tbody = element.find("tbody") or element
+    for tr in tbody.find_all("tr"):
+        cells = [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]
+        if cells:
+            rows.append(cells)
+
+    # If no thead, first row might be headers
+    if not headers and rows:
+        first_row_el = (element.find("thead") or element).find("tr")
+        if first_row_el and first_row_el.find("th"):
+            headers = rows.pop(0)
+
+    return Table(
+        number=counter,
+        label=label,
+        caption=caption,
+        html=str(element),
+        headers=headers,
+        rows=rows,
+        row_count=len(rows),
+        col_count=len(headers) if headers else (len(rows[0]) if rows else 0),
+        context=context,
+        dom_position=dom_pos,
+    )
+
+
+def _extract_all_elements(
+    soup: BeautifulSoup,
+) -> tuple[list[Figure], list[CodeBlock], list[MathFormula], list[Table], list[Section]]:
+    """Extract all structured elements in DOM order."""
     figures = []
     code_blocks = []
     math_formulas = []
+    tables = []
+    sections = []
 
     fig_counter = 0
     code_counter = 0
     math_counter = 0
+    table_counter = 0
 
-    # Walk all visual elements in DOM order
-    all_elements = soup.find_all(["figure", "pre", "math"])
+    # Walk all visual elements + headings in DOM order
+    all_elements = soup.find_all(["figure", "pre", "math", "table", "h1", "h2", "h3"])
     for dom_pos, element in enumerate(all_elements):
+        # Sections from headings
+        if element.name in ("h1", "h2", "h3"):
+            level = int(element.name[1])
+            title = element.get_text(strip=True)
+            if title:
+                sections.append(Section(level=level, title=title, dom_position=dom_pos))
+            continue
+
         context = _get_current_heading(element)
 
         if element.name == "figure":
@@ -141,7 +230,11 @@ def _extract_all_elements(soup: BeautifulSoup) -> tuple[list[Figure], list[CodeB
                 dom_position=dom_pos,
             ))
 
-    return figures, code_blocks, math_formulas
+        elif element.name == "table":
+            table_counter += 1
+            tables.append(_extract_table(element, table_counter, context, dom_pos))
+
+    return figures, code_blocks, math_formulas, tables, sections
 
 
 def _extract_chapter(
@@ -163,7 +256,6 @@ def _extract_chapter(
     title = ""
     if h1:
         title = h1.get_text(strip=True)
-        # Strip "Chapter N. " prefix if present
         label_span = h1.find("span", class_="label")
         if label_span:
             label_text = label_span.get_text(strip=True)
@@ -172,7 +264,7 @@ def _extract_chapter(
     filename = chapter_file.split("/")[-1]
 
     # Extract all structured elements in DOM order
-    figures, code_blocks, math_formulas = _extract_all_elements(soup)
+    figures, code_blocks, math_formulas, tables, sections = _extract_all_elements(soup)
 
     # Extract image data from ZIP
     images = {}
@@ -185,8 +277,9 @@ def _extract_chapter(
 
     logger.info(
         f"Chapter {chapter_number}: {title} — "
-        f"{len(figures)} figures, {len(code_blocks)} code blocks, "
-        f"{len(math_formulas)} math formulas"
+        f"{len(figures)} fig, {len(code_blocks)} code, "
+        f"{len(math_formulas)} math, {len(tables)} tables, "
+        f"{len(sections)} sections"
     )
 
     return Chapter(
@@ -197,19 +290,17 @@ def _extract_chapter(
         figures=figures,
         code_blocks=code_blocks,
         math_formulas=math_formulas,
+        tables=tables,
+        sections=sections,
         images=images,
     )
 
 
 def extract_chapters(epub_path: Path) -> list[Chapter]:
-    """Extract all chapters from an EPUB file.
-
-    Returns a list of Chapter objects sorted by chapter number.
-    """
+    """Extract all chapters from an EPUB file."""
     chapters = []
 
     with zipfile.ZipFile(epub_path, "r") as zf:
-        # Find chapter files (ch01.html, ch02.html, ...)
         chapter_files = sorted(
             name for name in zf.namelist()
             if re.match(r"OEBPS/ch\d+\.x?html$", name)
@@ -221,12 +312,10 @@ def extract_chapters(epub_path: Path) -> list[Chapter]:
         logger.info(f"Found {len(chapter_files)} chapters in {epub_path.name}")
 
         for ch_file in chapter_files:
-            # Extract chapter number from filename
             match = re.search(r"ch(\d+)", ch_file)
             if not match:
                 continue
             ch_num = int(match.group(1))
-
             chapter = _extract_chapter(zf, ch_file, ch_num)
             chapters.append(chapter)
 
@@ -242,3 +331,46 @@ def extract_cover(epub_path: Path) -> bytes | None:
             except KeyError:
                 continue
     return None
+
+
+def extract_metadata(epub_path: Path) -> dict[str, str]:
+    """Extract book metadata (title, author, year) from EPUB content.opf."""
+    metadata = {}
+    ns = {
+        "opf": "http://www.idpf.org/2007/opf",
+        "dc": "http://purl.org/dc/elements/1.1/",
+    }
+
+    with zipfile.ZipFile(epub_path, "r") as zf:
+        # Find the OPF file
+        opf_candidates = [
+            name for name in zf.namelist()
+            if name.endswith(".opf")
+        ]
+        if not opf_candidates:
+            return metadata
+
+        opf_content = zf.read(opf_candidates[0]).decode("utf-8")
+        try:
+            root = ElementTree.fromstring(opf_content)
+        except ElementTree.ParseError:
+            return metadata
+
+        # Title
+        title_el = root.find(".//dc:title", ns)
+        if title_el is not None and title_el.text:
+            metadata["title"] = title_el.text.strip()
+
+        # Author
+        creator_el = root.find(".//dc:creator", ns)
+        if creator_el is not None and creator_el.text:
+            metadata["author"] = creator_el.text.strip()
+
+        # Year from dc:date
+        date_el = root.find(".//dc:date", ns)
+        if date_el is not None and date_el.text:
+            year_match = re.search(r"\d{4}", date_el.text)
+            if year_match:
+                metadata["year"] = year_match.group()
+
+    return metadata

@@ -1,0 +1,16 @@
+{
+  "_comment": "Custom pronunciation overrides. Case-insensitive find-and-replace before TTS.",
+  "terms": {
+    "LLaMA": "Lah-mah",
+    "FAISS": "face",
+    "Qdrant": "quadrant",
+    "LoRA": "low-rah",
+    "ONNX": "onyx",
+    "PyTorch": "pie-torch",
+    "NumPy": "num-pie",
+    "sklearn": "sigh-kit learn",
+    "nginx": "engine-x",
+    "kubectl": "kube-control",
+    "Kubernetes": "koo-ber-net-eez"
+  }
+}
