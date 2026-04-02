@@ -113,8 +113,17 @@ def _load_pronunciation(pronunciation_file: str) -> dict[str, str]:
 def clean_chapter(
     raw_html: str,
     pronunciation_file: str = "pronunciation.json",
+    chapter=None,
 ) -> tuple[str, list[SectionMarker]]:
     """Convert chapter HTML to TTS-friendly plain text.
+
+    Args:
+        raw_html: Raw HTML content of the chapter.
+        pronunciation_file: Path to pronunciation dictionary JSON.
+        chapter: Optional Chapter object with LLM-enriched fields
+            (intro, code_blocks[].annotation, figure_descriptions,
+            tables[].narration). When None or enrichment fields are
+            empty, generic placeholders are used as fallback.
 
     Returns:
         tuple of (cleaned text, list of SectionMarker with char offsets)
@@ -132,6 +141,30 @@ def clean_chapter(
     if not body:
         body = soup
 
+    # Build enrichment lookups from LLM-enriched chapter data (if provided).
+    # code_annotations: CodeBlock.number (1-based sequential) -> annotation text
+    # fig_desc_by_label: Figure.label string -> description text
+    #   (keyed by label, not number, because the extractor skips figures without
+    #    <img> tags while the cleaner does not — label matching is always safe)
+    # table_narrations: Table.number (1-based sequential) -> narration text
+    # chapter_intro: prepended before chapter body text
+    code_annotations: dict[int, str] = {}
+    fig_desc_by_label: dict[str, str] = {}
+    table_narrations: dict[int, str] = {}
+    chapter_intro: str = ""
+    if chapter is not None:
+        for cb in chapter.code_blocks:
+            if cb.annotation:
+                code_annotations[cb.number] = cb.annotation
+        for fig in chapter.figures:
+            desc = chapter.figure_descriptions.get(fig.number, "")
+            if desc:
+                fig_desc_by_label[fig.label] = desc
+        for tbl in chapter.tables:
+            if tbl.narration:
+                table_narrations[tbl.number] = tbl.narration
+        chapter_intro = chapter.intro or ""
+
     # --- Phase 1: Remove invisible / unwanted elements ---
 
     # Remove index term anchors (invisible)
@@ -148,14 +181,23 @@ def clean_chapter(
 
     code_counter = 0
     math_counter = 0
+    fig_counter = 0
+    table_counter = 0
 
-    # Process code blocks: <pre> → numbered reference
+    # Process code blocks: <pre> → annotation (if enriched) or generic reference
     for pre in body.find_all("pre"):
         code_counter += 1
-        replacement = (
-            f"\n\nThe author provides code example number {code_counter} here. "
-            f"You can find it in the companion PDF for this chapter.\n\n"
-        )
+        annotation = code_annotations.get(code_counter, "")
+        if annotation:
+            replacement = (
+                f"\n\nCode example {code_counter}: {annotation} "
+                f"See the companion PDF for the full code.\n\n"
+            )
+        else:
+            replacement = (
+                f"\n\nThe author provides code example number {code_counter} here. "
+                f"You can find it in the companion PDF for this chapter.\n\n"
+            )
         pre.replace_with(NavigableString(replacement))
 
     # Process math: <math> → numbered reference
@@ -176,8 +218,9 @@ def clean_chapter(
         else:
             eq_div.decompose()
 
-    # Process figures: <figure> → reference with caption
+    # Process figures: <figure> → LLM description (if enriched) or reference with caption
     for fig in body.find_all("figure"):
+        fig_counter += 1
         label = ""
         caption = ""
         alt = ""
@@ -198,15 +241,26 @@ def clean_chapter(
         if not label:
             label = "a figure"
 
-        parts = [f"\n\nSee {label} in the companion PDF"]
-        desc = caption or alt
-        if desc:
-            parts.append(f": {desc}")
-        parts.append(".\n\n")
-        fig.replace_with(NavigableString("".join(parts)))
+        llm_desc = fig_desc_by_label.get(label, "")
+        if llm_desc:
+            replacement = f"\n\nSee {label} in the companion PDF. {llm_desc}\n\n"
+        else:
+            parts = [f"\n\nSee {label} in the companion PDF"]
+            fallback_desc = caption or alt
+            if fallback_desc:
+                parts.append(f": {fallback_desc}")
+            parts.append(".\n\n")
+            replacement = "".join(parts)
+        fig.replace_with(NavigableString(replacement))
 
-    # Process tables
+    # Process tables: LLM narration (if enriched) or small/large fallback
     for table in body.find_all("table"):
+        table_counter += 1
+        narration = table_narrations.get(table_counter, "")
+        if narration:
+            table.replace_with(NavigableString(f"\n\n{narration}\n\n"))
+            continue
+
         label = ""
         caption_text = ""
         caption_tag = table.find("caption")
@@ -334,6 +388,12 @@ def clean_chapter(
 
     # --- Phase 5: Extract final text ---
     text = body.get_text()
+
+    # Prepend LLM chapter intro before post-processing so it gets the same
+    # acronym expansion, whitespace normalization, and URL removal as the body.
+    # Section marker char offsets are built after this, so they remain correct.
+    if chapter_intro:
+        text = chapter_intro + "\n\n" + text
 
     # --- Phase 6: Post-processing ---
     pronunciation = _load_pronunciation(pronunciation_file)

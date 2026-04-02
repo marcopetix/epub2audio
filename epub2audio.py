@@ -232,6 +232,7 @@ def main():
         clean_text, section_markers = clean_chapter(
             chapter.raw_html,
             pronunciation_file=config.pronunciation_file,
+            chapter=chapter,
         )
         chunks = chunk_text(clean_text, config.max_chunk_chars, section_markers)
         chapter_data.append((chapter, clean_text, chunks, section_markers))
