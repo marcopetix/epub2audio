@@ -37,8 +37,8 @@ def parse_args() -> Config:
     parser.add_argument("epub_path", type=Path, help="Path to .epub file")
     parser.add_argument("-o", "--output", type=Path, default=Path("./audiobook"),
                         help="Output directory (default: ./audiobook)")
-    parser.add_argument("--voice", default="af_nicole",
-                        help="Kokoro voice ID (default: af_nicole)")
+    parser.add_argument("--voice", default="af_heart",
+                        help="Kokoro voice ID (default: af_heart)")
     parser.add_argument("--speed", type=float, default=1.1,
                         help="TTS speed multiplier (default: 1.1)")
     parser.add_argument("--chapters", type=int, nargs="+",

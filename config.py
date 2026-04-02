@@ -9,7 +9,7 @@ class Config:
     output_dir: Path = Path("./audiobook")
 
     # TTS
-    voice: str = "af_nicole"
+    voice: str = "af_heart"
     speed: float = 1.1
     lang: str = "en-us"
     kokoro_model: str = "kokoro-v1.0.onnx"
