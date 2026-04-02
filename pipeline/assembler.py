@@ -135,7 +135,7 @@ def assemble_m4b(
         for wav_result in results:
             # Check for section markers in this chunk
             for marker in wav_result.chunk.section_markers:
-                if marker.level <= 2:
+                if marker.level <= 3:
                     sub_markers.append((marker.title, chunk_offset_ms))
 
             segment = AudioSegment.from_wav(str(wav_result.path))
