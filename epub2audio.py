@@ -2,10 +2,10 @@
 """epub2audio v2 — Convert EPUB books to M4B audiobooks with companion PDFs/HTML.
 
 Usage:
-    python epub2audio.py book.epub
-    python epub2audio.py book.epub --chapters 1 2 3 --no-llm
-    python epub2audio.py book.epub --format both --qc --upload
-    python epub2audio.py book.epub --dry-run
+    python epub2audio.py book.epub # Process entire book with defaults
+    python epub2audio.py book.epub --chapters 1 2 3 --no-llm # Only process chapters 1-3, skip LLM enrichment
+    python epub2audio.py book.epub --format both --qc --upload # Generate both M4B and MP3, run quality check, and upload to Google Drive
+    python epub2audio.py book.epub --dry-run # Show stats and what would be done without generating audio
 """
 
 import argparse
@@ -35,8 +35,8 @@ def parse_args() -> Config:
     )
 
     parser.add_argument("epub_path", type=Path, help="Path to .epub file")
-    parser.add_argument("-o", "--output", type=Path, default=Path("./audiobook"),
-                        help="Output directory (default: ./audiobook)")
+    parser.add_argument("-o", "--output", type=Path, default=Path("./output/audiobook"),
+                        help="Output directory (default: ./output/audiobook)")
     parser.add_argument("--voice", default="af_heart",
                         help="Kokoro voice ID (default: af_heart)")
     parser.add_argument("--speed", type=float, default=1.1,
@@ -69,8 +69,8 @@ def parse_args() -> Config:
                         help="Path to Kokoro ONNX model")
     parser.add_argument("--voices", default="voices-v1.0.bin",
                         help="Path to Kokoro voices file")
-    parser.add_argument("--max-chars", type=int, default=3500,
-                        help="Max chars per TTS chunk (default: 3500)")
+    parser.add_argument("--max-chars", type=int, default=2500,
+                        help="Max chars per TTS chunk (default: 2500)")
 
     # Quality check
     parser.add_argument("--qc", action="store_true",
@@ -127,11 +127,11 @@ def check_dependencies(config: Config):
     model_path = Path(config.kokoro_model)
     voices_path = Path(config.kokoro_voices)
     if not model_path.exists():
-        logger.error(f"Kokoro model not found: {model_path}")
+        logger.error("Kokoro model not found: %s", model_path)
         logger.error("Run setup.sh to download model files")
         sys.exit(1)
     if not voices_path.exists():
-        logger.error(f"Kokoro voices not found: {voices_path}")
+        logger.error("Kokoro voices not found: %s", voices_path)
         logger.error("Run setup.sh to download model files")
         sys.exit(1)
 
@@ -162,7 +162,7 @@ def main():
     # ================================================================
     # Phase 1: Extract chapters
     # ================================================================
-    logger.info(f"[Phase 1/7] Extracting chapters from {config.epub_path.name}...")
+    logger.info("[Phase 1/7] Extracting chapters from %s", config.epub_path.name)
     t0 = time.time()
 
     all_chapters = extract_chapters(config.epub_path)
@@ -187,11 +187,11 @@ def main():
     chapters = all_chapters
     if config.chapters:
         chapters = [ch for ch in all_chapters if ch.number in config.chapters]
-        logger.info(f"Processing {len(chapters)}/{len(all_chapters)} chapters: {config.chapters}")
+        logger.info("[Phase 1/7] Processing %d/%d chapters: %s", len(chapters), len(all_chapters), config.chapters)
 
     total_chapters = len(all_chapters)
     phase_times["extract"] = time.time() - t0
-    logger.info(f"Extracted {len(all_chapters)} chapters ({len(chapters)} selected)")
+    logger.info("[Phase 1/7] Extracted %d chapters (%d selected)", len(all_chapters), len(chapters))
 
     # ================================================================
     # Phase 2: LLM Enrichment (optional)
@@ -216,7 +216,7 @@ def main():
         except ImportError:
             logger.warning("llm_enricher not available, skipping LLM enrichment")
         except Exception as e:
-            logger.warning(f"LLM enrichment failed: {e}, continuing without it")
+            logger.warning("LLM enrichment failed: %s, continuing without it", e)
         phase_times["llm"] = time.time() - t0
     else:
         logger.info("[Phase 2/7] LLM enrichment skipped (--no-llm)")
@@ -237,7 +237,10 @@ def main():
         chunks = chunk_text(clean_text, config.max_chunk_chars, section_markers)
         chapter_data.append((chapter, clean_text, chunks, section_markers))
         logger.info(
-            f"  Ch {chapter.number}: {len(clean_text)} chars -> {len(chunks)} chunks"
+            "[Phase 3/7]  Ch %d: %d chars -> %d chunks",
+            chapter.number,
+            len(clean_text),
+            len(chunks)
         )
 
     phase_times["clean_chunk"] = time.time() - t0
@@ -298,7 +301,7 @@ def main():
         if results:
             wav_results[chapter.number] = results
         else:
-            logger.error(f"No audio for chapter {chapter.number}, skipping")
+            logger.error("No audio for chapter %d, skipping", chapter.number)
 
     synth.unload()
     logger.info("TTS complete, Kokoro unloaded")
@@ -330,6 +333,8 @@ def main():
                 total_chapters=total_chapters,
                 cover_art=cover_art,
             )
+            if mp3_path:
+                logger.info("MP3 written: %s", mp3_path)
 
     # M4B (if format is "m4b" or "both")
     if config.output_format in ("m4b", "both"):
@@ -341,7 +346,7 @@ def main():
             cover_art=cover_art,
         )
         if m4b_path:
-            logger.info(f"M4B written: {m4b_path}")
+            logger.info("M4B written: %s", m4b_path)
 
     # Build manifest entries
     for chapter, clean_text, chunks, _ in chapter_data:
@@ -397,38 +402,9 @@ def main():
     # Phase 7: Quality Check (optional)
     # ================================================================
     if config.enable_qc:
-        logger.info("[Phase 7/7] Running Whisper quality check...")
-        t0 = time.time()
-        try:
-            from pipeline.quality_check import QualityChecker
-            checker = QualityChecker(model_size=config.whisper_model)
-            qc_reports = []
-            for chapter, clean_text, chunks, _ in chapter_data:
-                if chapter.number not in wav_results:
-                    continue
-                report = checker.check_chapter(
-                    wav_results=wav_results[chapter.number],
-                    chunks=chunks,
-                )
-                qc_reports.append(report)
-                logger.info(
-                    f"  Ch {chapter.number}: similarity {report.similarity_ratio:.2%}"
-                )
-            checker.unload()
-
-            # Save QC report
-            qc_path = config.output_dir / "qc_report.json"
-            qc_path.write_text(json.dumps(
-                [r.to_dict() for r in qc_reports], indent=2, ensure_ascii=False
-            ))
-            logger.info(f"QC report saved to {qc_path}")
-            phase_times["qc"] = time.time() - t0
-        except ImportError:
-            logger.warning("faster-whisper not installed, skipping QC")
-        except Exception as e:
-            logger.error(f"Quality check failed: {e}")
-    else:
-        logger.info("[Phase 7/7] Quality check skipped (use --qc to enable)")
+        logger.warning("Whisper quality check is deprecated and may be removed in future versions. "
+                       "The phase is skipped, but the option remains for backward compatibility. "
+                       "See README.md for details.")
 
     # ================================================================
     # Cleanup temp WAVs
@@ -449,22 +425,15 @@ def main():
     }
     manifest_path = config.output_dir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False))
-    logger.info(f"Manifest written to {manifest_path}")
+    logger.info("Manifest written to %s", manifest_path)
 
     # ================================================================
     # Optional upload
     # ================================================================
     if config.upload_gdrive:
-        try:
-            from pipeline.uploader import upload_to_drive
-            upload_to_drive(config)
-        except ImportError:
-            logger.error(
-                "Google Drive upload requires: "
-                "pip install google-api-python-client google-auth-oauthlib"
-            )
-        except Exception as e:
-            logger.error(f"Upload failed: {e}")
+        logger.warning("Google Drive upload is deprecated and may be removed in future versions. "
+                       "The feature is skipped, but the option remains for backward compatibility. "
+                       "See README.md for details.")
 
     # ================================================================
     # Summary
@@ -480,7 +449,7 @@ def main():
     print(f"  Companions:  {len(companion_files)} files in {config.companions_dir}")
     print(f"  Total size:  {total_size / 1024 / 1024:.1f} MB")
     print(f"  Manifest:    {manifest_path}")
-    print(f"  Phase times:")
+    print("  Phase times:")
     for phase, t in phase_times.items():
         print(f"    {phase:15s} {t:.1f}s")
     print(f"{'='*60}")

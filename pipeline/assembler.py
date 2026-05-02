@@ -48,7 +48,7 @@ def assemble_chapter(
     if not wav_paths:
         raise ValueError(f"No WAV files for chapter {chapter_num}")
 
-    logger.info(f"Assembling chapter {chapter_num}: {len(wav_paths)} chunks -> MP3")
+    logger.info("Assembling chapter %s: %s chunks -> MP3", chapter_num, len(wav_paths))
     combined = AudioSegment.empty()
     for wav_path in wav_paths:
         segment = AudioSegment.from_wav(str(wav_path))
@@ -85,8 +85,11 @@ def assemble_chapter(
 
     duration_sec = len(combined) / 1000.0
     logger.info(
-        f"Chapter {chapter_num}: {mp3_path.name} — "
-        f"{duration_sec / 60:.1f} min, {mp3_path.stat().st_size / 1024 / 1024:.1f} MB"
+        "Chapter %s: %s — %.1f min, %.1f MB",
+        chapter_num,
+        mp3_path.name,
+        duration_sec / 60,
+        mp3_path.stat().st_size / 1024 / 1024,
     )
 
     return mp3_path
@@ -164,7 +167,7 @@ def assemble_m4b(
         return None
 
     total_duration_ms = len(combined)
-    logger.info(f"Total audio: {total_duration_ms / 1000 / 60:.1f} minutes")
+    logger.info("Total audio: %.1f minutes", total_duration_ms / 1000 / 60)
 
     # Sort markers by start time and fix end times
     chapter_markers.sort(key=lambda m: m[1])
@@ -219,7 +222,7 @@ def assemble_m4b(
         )
 
         if result.returncode != 0:
-            logger.error(f"ffmpeg failed: {result.stderr[-500:]}")
+            logger.error("ffmpeg failed: %s", result.stderr[-500:])
             return None
 
     # Step 5: Add MP4 tags and cover art
@@ -236,13 +239,15 @@ def assemble_m4b(
 
         audio.save()
     except Exception as e:
-        logger.warning(f"Failed to add MP4 tags: {e}")
+        logger.warning("Failed to add MP4 tags: %s", e)
 
     size_mb = m4b_path.stat().st_size / 1024 / 1024
     logger.info(
-        f"M4B: {m4b_path.name} — "
-        f"{total_duration_ms / 1000 / 60:.1f} min, {size_mb:.1f} MB, "
-        f"{len(fixed_markers)} chapter markers"
+        "M4B: %s — %.1f min, %.1f MB, %d chapter markers",
+        m4b_path.name,
+        total_duration_ms / 1000 / 60,
+        size_mb,
+        len(fixed_markers),
     )
 
     return m4b_path

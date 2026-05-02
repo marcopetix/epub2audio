@@ -13,6 +13,9 @@ from bs4 import BeautifulSoup, Tag
 logger = logging.getLogger(__name__)
 
 
+# TODO: Creare una classe NarratedElement che rappresenti qualsiasi elemento con una descrizione LLM-generated. Semplificherebbe i passi di arricchimento e generazione audio.
+# TODO: Testare con EPUB di un'altra casa editrice per assicurarci che il parsing sia robusto a variazioni di struttura HTML.
+
 @dataclass
 class Figure:
     number: int           # Sequential within chapter (1-based)
@@ -273,13 +276,17 @@ def _extract_chapter(
         try:
             images[fig.src] = zf.read(img_path)
         except KeyError:
-            logger.warning(f"Image not found in EPUB: {img_path}")
+            logger.warning("Image not found in EPUB: %s", img_path)
 
     logger.info(
-        f"Chapter {chapter_number}: {title} — "
-        f"{len(figures)} fig, {len(code_blocks)} code, "
-        f"{len(math_formulas)} math, {len(tables)} tables, "
-        f"{len(sections)} sections"
+        "Chapter %s: %s — %d fig, %d code, %d math, %d tables, %d sections",
+        chapter_number,
+        title,
+        len(figures),
+        len(code_blocks),
+        len(math_formulas),
+        len(tables),
+        len(sections),
     )
 
     return Chapter(
@@ -309,7 +316,7 @@ def extract_chapters(epub_path: Path) -> list[Chapter]:
         if not chapter_files:
             raise ValueError(f"No chapter files found in {epub_path}")
 
-        logger.info(f"Found {len(chapter_files)} chapters in {epub_path.name}")
+        logger.info("Found %d chapters in %s", len(chapter_files), epub_path.name)
 
         for ch_file in chapter_files:
             match = re.search(r"ch(\d+)", ch_file)

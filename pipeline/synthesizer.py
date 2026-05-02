@@ -37,6 +37,7 @@ class Synthesizer:
         import onnxruntime as ort
         from kokoro_onnx import Kokoro
 
+        # Auto-enable GPU if available and not already set
         if "ONNX_PROVIDER" not in os.environ:
             available = ort.get_available_providers()
             if "CUDAExecutionProvider" in available:
@@ -56,8 +57,11 @@ class Synthesizer:
 
         provider = self.kokoro.sess.get_providers()[0]
         logger.info(
-            f"Kokoro loaded — voice={voice}, speed={speed}, "
-            f"workers={num_workers}, provider={provider}"
+            "Kokoro loaded — voice=%s, speed=%s, workers=%s, provider=%s",
+            voice,
+            speed,
+            num_workers,
+            provider,
         )
 
     def synthesize_chunk(
@@ -82,7 +86,7 @@ class Synthesizer:
             duration = len(samples) / sample_rate
             return output_path, duration
         except Exception as e:
-            logger.error(f"Synthesis failed for {output_path.name}: {e}")
+            logger.error("Synthesis failed for %s: %s", output_path.name, e)
             return None
 
     def synthesize_chapter(
@@ -132,7 +136,10 @@ class Synthesizer:
                 results.append(WavResult(path=path, duration=duration, chunk=chunk))
 
         logger.info(
-            f"Chapter {chapter_num}: synthesized {len(results)}/{len(chunks)} chunks"
+            "Chapter %s: synthesized %s/%s chunks",
+            chapter_num,
+            len(results),
+            len(chunks),
         )
         return results
 
@@ -184,12 +191,15 @@ class Synthesizer:
                                 path=path, duration=duration, chunk=chunk
                             )
                     except Exception as e:
-                        logger.error(f"Worker failed for chunk {chunk.index}: {e}")
+                        logger.error("Worker failed for chunk %s: %s", chunk.index, e)
 
         # Return in chunk order
         ordered = [results[i] for i in sorted(results.keys())]
         logger.info(
-            f"Chapter {chapter_num}: synthesized {len(ordered)}/{len(chunks)} chunks"
+            "Chapter %s: synthesized %s/%s chunks",
+            chapter_num,
+            len(ordered),
+            len(chunks),
         )
         return ordered
 

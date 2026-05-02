@@ -100,13 +100,13 @@ def _load_pronunciation(pronunciation_file: str) -> dict[str, str]:
     if not path.exists():
         return {}
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
         # Support both flat dict and {"terms": {...}} format
         if "terms" in data:
             return data["terms"]
         return data
     except (json.JSONDecodeError, KeyError) as e:
-        logger.warning(f"Failed to load pronunciation file {path}: {e}")
+        logger.warning("Failed to load pronunciation file %s: %s", path, e)
         return {}
 
 

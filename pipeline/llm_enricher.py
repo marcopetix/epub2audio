@@ -72,7 +72,7 @@ class LLMEnricher:
         try:
             resp = requests.get(f"{self.ollama_url}/api/tags", timeout=5)
             if resp.status_code != 200:
-                logger.warning(f"Ollama returned status {resp.status_code}")
+                logger.warning("Ollama returned status '%s'", resp.status_code)
                 return False
             models = [m["name"] for m in resp.json().get("models", [])]
             # Check if model (with or without tag) is available
@@ -80,17 +80,19 @@ class LLMEnricher:
             found = any(model_base in m for m in models)
             if not found:
                 logger.warning(
-                    f"Model '{self.model}' not found in Ollama. "
-                    f"Available: {models}. Run: ollama pull {self.model}"
+                    "Model '%s' not found in Ollama. Available: %s. Run: ollama pull %s",
+                    self.model,
+                    models,
+                    self.model,
                 )
                 return False
-            logger.info(f"Ollama connected, model '{self.model}' available")
+            logger.info("Ollama connected, model '%s' available", self.model)
             return True
         except requests.ConnectionError:
-            logger.warning("Ollama not running at {self.ollama_url}")
+            logger.warning("Ollama not running at %s", self.ollama_url)
             return False
         except Exception as e:
-            logger.warning(f"Ollama check failed: {e}")
+            logger.warning("Ollama check failed: %s", e)
             return False
 
     def _cache_key(self, prompt: str, system: str = "") -> str:
@@ -150,10 +152,10 @@ class LLMEnricher:
             except Exception as e:
                 if attempt < retries - 1:
                     wait = 2 ** attempt
-                    logger.warning(f"Ollama call failed (attempt {attempt + 1}): {e}, retrying in {wait}s")
+                    logger.warning("Ollama call failed (attempt %s): %s, retrying in %s}s", attempt + 1, e, wait)
                     time.sleep(wait)
                 else:
-                    logger.error(f"Ollama call failed after {retries} attempts: {e}")
+                    logger.error("Ollama call failed after %s attempts: %s", retries, e)
                     return ""
 
     def enrich_chapter(self, chapter: Chapter) -> None:
@@ -161,7 +163,7 @@ class LLMEnricher:
         if not self.available:
             return
 
-        logger.info(f"Enriching chapter {chapter.number}: {chapter.title}")
+        logger.info("Enriching chapter %s: %s", chapter.number, chapter.title)
 
         # 1. Generate chapter intro
         chapter.intro = self._generate_intro(chapter)
@@ -180,9 +182,12 @@ class LLMEnricher:
                 table.narration = self._narrate_table(table)
 
         logger.info(
-            f"  Enriched: intro, {len(chapter.code_blocks)} code annotations, "
-            f"{len(chapter.figures)} figure descriptions, "
-            f"{sum(1 for t in chapter.tables if t.narration)} table narrations"
+            "  Enriched: intro, %s code annotations, "
+            "%s figure descriptions, "
+            "%s table narrations",
+            len(chapter.code_blocks),
+            len(chapter.figures),
+            sum(1 for t in chapter.tables if t.narration)
         )
 
     def _generate_intro(self, chapter: Chapter) -> str:
@@ -256,17 +261,9 @@ class LLMEnricher:
         return self._cached_call(prompt, system, max_tokens=300)
 
     def simplify_paragraph(self, text: str) -> str:
-        """Rewrite a dense paragraph for audio listening (Flesch < 40)."""
-        if _flesch_score(text) >= 40:
-            return text
-
-        system = (
-            "Rewrite this paragraph for audio listening. Keep ALL technical content "
-            "but use shorter sentences, explicit transitions, and repeat key terms "
-            "instead of pronouns. Do NOT summarize — maintain 100% of the information."
-        )
-        result = self._cached_call(text, system, max_tokens=1024)
-        return result if result else text
+        """Rewrite a dense paragraph to be more suitable for audio listening."""
+        
+        raise NotImplementedError("Paragraph simplification is deprecated and not implemented. See README.md for details.")
 
     def unload(self):
         """Tell Ollama to unload the model from VRAM."""
@@ -276,6 +273,6 @@ class LLMEnricher:
                 json={"model": self.model, "keep_alive": 0},
                 timeout=10,
             )
-            logger.info(f"Ollama model '{self.model}' unloaded from VRAM")
+            logger.info("Ollama model '%s' unloaded from VRAM", self.model)
         except Exception as e:
-            logger.warning(f"Failed to unload Ollama model: {e}")
+            logger.warning("Failed to unload Ollama model: %s", e)

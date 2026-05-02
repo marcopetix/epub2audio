@@ -11,9 +11,7 @@ __pycache__/
 *.epub
 
 # Output directories
-audiobook/
-test/
-test_v2/
+output/
 
 # LLM cache
 .llm_cache/
@@ -30,3 +28,6 @@ token.pickle
 
 # Misc
 =1.17.0
+
+# Notes
+notes/
