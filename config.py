@@ -40,7 +40,7 @@ class Config:
     whisper_model: str = "medium"
 
     # Processing
-    max_chunk_chars: int = 3500
+    max_chunk_chars: int = 2500
     chapters: list[int] | None = None  # None = all
     force: bool = False
     dry_run: bool = False
