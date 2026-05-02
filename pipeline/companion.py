@@ -10,14 +10,11 @@ import io
 import logging
 from pathlib import Path
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-from bs4 import BeautifulSoup, NavigableString, Tag
 from fpdf import FPDF
 from PIL import Image
 
 from pipeline.extractor import Chapter, CodeBlock, Figure, MathFormula, Table
+from pipeline.math_renderer import _mathml_string_to_latex, _render_latex_to_image
 
 logger = logging.getLogger(__name__)
 
@@ -42,128 +39,6 @@ TOKEN_COLORS = {
     "Literal.Number": (204, 102, 0),
     "Operator": (0, 0, 0),
 }
-
-
-# ---------------------------------------------------------------------------
-# MathML → LaTeX conversion (unchanged from v1)
-# ---------------------------------------------------------------------------
-
-def _mathml_to_latex(el) -> str:
-    if isinstance(el, NavigableString):
-        return str(el).strip()
-    if not isinstance(el, Tag):
-        return ""
-
-    def child_tags(e):
-        return [c for c in e.children if isinstance(c, Tag)]
-
-    def recurse(e):
-        return "".join(_mathml_to_latex(c) for c in e.children)
-
-    tag = el.name
-    if tag in ("math", "mrow", "mstyle", "semantics"):
-        return recurse(el)
-    elif tag == "mi":
-        t = el.get_text()
-        return rf"\mathrm{{{t}}}" if len(t) > 1 else t
-    elif tag == "mo":
-        t = el.get_text()
-        ops = {
-            "\u00d7": r"\times", "\u00b7": r"\cdot",
-            "\u2264": r"\leq", "\u2265": r"\geq",
-            "\u2211": r"\sum", "\u220f": r"\prod",
-            "\u2016": r"\parallel", "\u2026": r"\ldots",
-            "\u221e": r"\infty", "\u2260": r"\neq",
-            "\u2208": r"\in", "\u2192": r"\rightarrow",
-        }
-        return ops.get(t, t)
-    elif tag == "mn":
-        return el.get_text()
-    elif tag == "mtext":
-        return rf"\text{{{el.get_text()}}}"
-    elif tag == "mspace":
-        return r"\;"
-    elif tag == "mfrac":
-        kids = child_tags(el)
-        if len(kids) >= 2:
-            return rf"\frac{{{_mathml_to_latex(kids[0])}}}{{{_mathml_to_latex(kids[1])}}}"
-        return recurse(el)
-    elif tag == "msup":
-        kids = child_tags(el)
-        if len(kids) >= 2:
-            return rf"{_mathml_to_latex(kids[0])}^{{{_mathml_to_latex(kids[1])}}}"
-        return recurse(el)
-    elif tag == "msub":
-        kids = child_tags(el)
-        if len(kids) >= 2:
-            return rf"{_mathml_to_latex(kids[0])}_{{{_mathml_to_latex(kids[1])}}}"
-        return recurse(el)
-    elif tag == "msubsup":
-        kids = child_tags(el)
-        if len(kids) >= 3:
-            return (
-                rf"{_mathml_to_latex(kids[0])}"
-                rf"_{{{_mathml_to_latex(kids[1])}}}"
-                rf"^{{{_mathml_to_latex(kids[2])}}}"
-            )
-        return recurse(el)
-    elif tag == "msqrt":
-        return rf"\sqrt{{{recurse(el)}}}"
-    elif tag == "mover":
-        kids = child_tags(el)
-        if len(kids) >= 2:
-            return rf"\overline{{{_mathml_to_latex(kids[0])}}}"
-        return recurse(el)
-    elif tag == "munder":
-        kids = child_tags(el)
-        if len(kids) >= 2:
-            return rf"\underset{{{_mathml_to_latex(kids[1])}}}{{{_mathml_to_latex(kids[0])}}}"
-        return recurse(el)
-    elif tag == "munderover":
-        kids = child_tags(el)
-        if len(kids) >= 3:
-            return (
-                rf"{_mathml_to_latex(kids[0])}"
-                rf"_{{{_mathml_to_latex(kids[1])}}}"
-                rf"^{{{_mathml_to_latex(kids[2])}}}"
-            )
-        return recurse(el)
-    elif tag == "mtable":
-        rows = child_tags(el)
-        latex_rows = []
-        for row in rows:
-            cells = child_tags(row)
-            latex_rows.append(" & ".join(_mathml_to_latex(c) for c in cells))
-        return r"\begin{matrix}" + r" \\ ".join(latex_rows) + r"\end{matrix}"
-    else:
-        return recurse(el)
-
-
-def _render_latex_to_image(latex_str: str) -> bytes | None:
-    try:
-        fig, ax = plt.subplots(figsize=(8, 1.2))
-        ax.text(
-            0.5, 0.5, f"${latex_str}$",
-            fontsize=18, ha="center", va="center",
-            transform=ax.transAxes,
-        )
-        ax.axis("off")
-        fig.tight_layout(pad=0.3)
-        buf = io.BytesIO()
-        fig.savefig(buf, format="png", dpi=150, bbox_inches="tight", facecolor="white")
-        plt.close(fig)
-        buf.seek(0)
-        return buf.getvalue()
-    except Exception as e:
-        logger.warning(f"Failed to render LaTeX: {e}")
-        plt.close("all")
-        return None
-
-
-def _mathml_string_to_latex(mathml: str) -> str:
-    soup = BeautifulSoup(mathml, "lxml-xml")
-    math = soup.find("math")
-    return _mathml_to_latex(math) if math else ""
 
 
 # ---------------------------------------------------------------------------
@@ -254,15 +129,13 @@ def _compute_element_timestamps(
     cumulative_seconds = 0.0
 
     for wav_result in audio_timestamps:
-        chunk = wav_result.chunk
         # Elements whose dom_position maps to content in this chunk's range
         # We approximate: chunk.char_start is where this chunk's audio begins
-        for elem_list in [chapter.figures, chapter.code_blocks, chapter.math_formulas, chapter.tables]:
-            for elem in elem_list:
-                if elem.dom_position not in timestamps:
-                    # Rough heuristic: map dom_position to approximate audio time
-                    # based on relative position in the text
-                    timestamps[elem.dom_position] = _format_timestamp(cumulative_seconds)
+        for elem in chapter.elements:
+            if elem.dom_position not in timestamps:
+                # Rough heuristic: map dom_position to approximate audio time
+                # based on relative position in the text
+                timestamps[elem.dom_position] = _format_timestamp(cumulative_seconds)
         cumulative_seconds += wav_result.duration
 
     return timestamps
@@ -473,6 +346,11 @@ def _add_image_to_pdf(pdf: CompanionPDF, image_data: bytes, max_width: float = C
 
 
 def _add_math_to_pdf(pdf: CompanionPDF, formula: MathFormula):
+    # Prefer pre-rendered PNG written by the extractor
+    if formula.rendered_path and formula.rendered_path.exists():
+        _add_image_to_pdf(pdf, formula.rendered_path.read_bytes(), max_width=CONTENT_W)
+        return
+    # Fallback: re-render on the fly via math_renderer
     latex = _mathml_string_to_latex(formula.mathml)
     if latex:
         img_data = _render_latex_to_image(latex)
@@ -586,12 +464,12 @@ def _generate_html(
             toc_lines.append(f'<a href="#{anchor}">{label}{" — " + ts if ts else ""}</a>')
 
             img_b64 = ""
-            if elem.src in chapter.images:
-                img_b64 = base64.b64encode(chapter.images[elem.src]).decode()
+            if elem.rendered_path and elem.rendered_path.exists():
+                img_b64 = base64.b64encode(elem.rendered_path.read_bytes()).decode()
 
             desc = ""
-            if chapter.figure_descriptions.get(elem.number):
-                desc = f'<p class="annotation">{chapter.figure_descriptions[elem.number]}</p>'
+            if elem.narration:
+                desc = f'<p class="annotation">{elem.narration}</p>'
 
             content_lines.append(f'''
   <div class="element fig" id="{anchor}">
@@ -610,8 +488,8 @@ def _generate_html(
             lang_label = f'<span class="lang-label">{elem.language}</span>' if elem.language else ""
 
             annotation = ""
-            if elem.annotation:
-                annotation = f'<p class="annotation">{elem.annotation}</p>'
+            if elem.narration:
+                annotation = f'<p class="annotation">{elem.narration}</p>'
 
             # Escape HTML in code
             escaped_code = (elem.code
@@ -762,19 +640,19 @@ def _generate_pdf(
             pdf.element_label(elem.label, elem.context, ts)
 
             # LLM description
-            desc = chapter.figure_descriptions.get(elem.number)
-            if desc:
+            if elem.narration:
                 pdf._font_sans("I", 9)
                 pdf.set_text_color(60, 60, 60)
-                pdf.multi_cell(CONTENT_W, 5, desc)
+                pdf.multi_cell(CONTENT_W, 5, elem.narration)
                 pdf.ln(2)
 
-            if elem.src in chapter.images:
-                _add_image_to_pdf(pdf, chapter.images[elem.src])
+            if elem.rendered_path and elem.rendered_path.exists():
+                _add_image_to_pdf(pdf, elem.rendered_path.read_bytes())
             else:
                 pdf._font_sans("I", 10)
                 pdf.set_text_color(200, 0, 0)
-                pdf.cell(0, 8, f"[Image not available: {elem.src}]", new_x="LMARGIN", new_y="NEXT")
+                missing = elem.rendered_path.name if elem.rendered_path else elem.label
+                pdf.cell(0, 8, f"[Image not available: {missing}]", new_x="LMARGIN", new_y="NEXT")
 
             if elem.caption:
                 pdf._font_sans("I", 10)
@@ -790,7 +668,7 @@ def _generate_pdf(
 
         elif isinstance(elem, CodeBlock):
             pdf.element_label(f"Code Example {elem.number}", elem.context, ts)
-            pdf.add_code_block_highlighted(elem.code, elem.language, elem.annotation)
+            pdf.add_code_block_highlighted(elem.code, elem.language, elem.narration)
 
         elif isinstance(elem, MathFormula):
             pdf.element_label(f"Formula {elem.number}", elem.context, ts)

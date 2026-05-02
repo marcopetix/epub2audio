@@ -121,9 +121,9 @@ def clean_chapter(
         raw_html: Raw HTML content of the chapter.
         pronunciation_file: Path to pronunciation dictionary JSON.
         chapter: Optional Chapter object with LLM-enriched fields
-            (intro, code_blocks[].annotation, figure_descriptions,
-            tables[].narration). When None or enrichment fields are
-            empty, generic placeholders are used as fallback.
+            (intro, and elements[].narration on CodeBlock/Figure/Table).
+            When None or enrichment fields are empty, generic placeholders
+            are used as fallback.
 
     Returns:
         tuple of (cleaned text, list of SectionMarker with char offsets)
@@ -154,12 +154,11 @@ def clean_chapter(
     chapter_intro: str = ""
     if chapter is not None:
         for cb in chapter.code_blocks:
-            if cb.annotation:
-                code_annotations[cb.number] = cb.annotation
+            if cb.narration:
+                code_annotations[cb.number] = cb.narration
         for fig in chapter.figures:
-            desc = chapter.figure_descriptions.get(fig.number, "")
-            if desc:
-                fig_desc_by_label[fig.label] = desc
+            if fig.narration:
+                fig_desc_by_label[fig.label] = fig.narration
         for tbl in chapter.tables:
             if tbl.narration:
                 table_narrations[tbl.number] = tbl.narration

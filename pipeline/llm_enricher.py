@@ -14,7 +14,7 @@ from pathlib import Path
 import requests
 from tqdm import tqdm
 
-from pipeline.extractor import Chapter
+from pipeline.extractor import Chapter, CodeBlock, Figure, Table
 
 logger = logging.getLogger(__name__)
 
@@ -159,7 +159,11 @@ class LLMEnricher:
                     return ""
 
     def enrich_chapter(self, chapter: Chapter) -> None:
-        """Enrich a chapter with LLM-generated content (modifies in place)."""
+        """Enrich a chapter with LLM-generated content (modifies in place).
+
+        Iterates chapter.elements once and dispatches by element type.
+        All generated text is written to element.narration.
+        """
         if not self.available:
             return
 
@@ -168,26 +172,29 @@ class LLMEnricher:
         # 1. Generate chapter intro
         chapter.intro = self._generate_intro(chapter)
 
-        # 2. Annotate code blocks
-        for cb in tqdm(chapter.code_blocks, desc=f"  Ch{chapter.number} code", leave=False):
-            cb.annotation = self._annotate_code(cb)
+        # 2. Iterate elements in DOM order, dispatch by type, write to narration
+        code_elems = [e for e in chapter.elements if isinstance(e, CodeBlock)]
+        fig_elems = [e for e in chapter.elements if isinstance(e, Figure)]
+        table_elems = [e for e in chapter.elements if isinstance(e, Table)]
 
-        # 3. Describe figures
-        for fig in tqdm(chapter.figures, desc=f"  Ch{chapter.number} figures", leave=False):
-            chapter.figure_descriptions[fig.number] = self._describe_figure(fig)
+        for cb in tqdm(code_elems, desc=f"  Ch{chapter.number} code", leave=False):
+            cb.narration = self._annotate_code(cb)
 
-        # 4. Narrate small tables
-        for table in chapter.tables:
+        for fig in tqdm(fig_elems, desc=f"  Ch{chapter.number} figures", leave=False):
+            fig.narration = self._describe_figure(fig)
+
+        for table in table_elems:
             if table.row_count <= 6:
                 table.narration = self._narrate_table(table)
+        # MathFormula skipped (no enrichment in this version)
 
         logger.info(
             "  Enriched: intro, %s code annotations, "
             "%s figure descriptions, "
             "%s table narrations",
-            len(chapter.code_blocks),
-            len(chapter.figures),
-            sum(1 for t in chapter.tables if t.narration)
+            sum(1 for e in code_elems if e.narration),
+            sum(1 for e in fig_elems if e.narration),
+            sum(1 for e in table_elems if e.narration),
         )
 
     def _generate_intro(self, chapter: Chapter) -> str:

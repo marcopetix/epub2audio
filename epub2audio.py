@@ -165,7 +165,7 @@ def main():
     logger.info("[Phase 1/7] Extracting chapters from %s", config.epub_path.name)
     t0 = time.time()
 
-    all_chapters = extract_chapters(config.epub_path)
+    all_chapters = extract_chapters(config.epub_path, config.assets_dir)
     cover_art = extract_cover(config.epub_path)
 
     # Auto-detect book metadata from EPUB if not overridden
@@ -378,10 +378,8 @@ def main():
     t0 = time.time()
 
     for chapter, _, _, _ in chapter_data:
-        # Save chapter images to assets dir
-        for src, img_data in chapter.images.items():
-            img_path = config.assets_dir / Path(src).name
-            img_path.write_bytes(img_data)
+        # Images and math PNGs are written to assets_dir during extraction;
+        # companion just reads them via element.rendered_path.
 
         # Get audio timestamps from wav_results if available
         audio_timestamps = None
