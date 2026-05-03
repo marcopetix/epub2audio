@@ -73,19 +73,18 @@ def parse_args() -> Config:
     parser.add_argument("--max-chars", type=int, default=2500,
                         help="Max chars per TTS chunk (default: 2500)")
 
-    # Quality check
-    parser.add_argument("--qc", action="store_true",
-                        help="Run Whisper quality check after synthesis")
-    parser.add_argument("--whisper-model", default="medium",
-                        help="Whisper model size for QC (default: medium)")
-
     # Pronunciation
     parser.add_argument("--pronunciation", default="pronunciation.json",
                         help="Path to pronunciation dictionary JSON")
-
-    # Upload
-    parser.add_argument("--upload", action="store_true",
-                        help="Upload to Google Drive after generation")
+    
+    parser.add_argument("--vision", action="store_true",
+                        help="Enable vision enrichment for figures (requires OPENROUTER_API_KEY)")
+    parser.add_argument("--vision-model", default="google/gemini-2.5-flash",
+                        help="Vision model (default: google/gemini-2.5-flash)")
+    parser.add_argument("--tracing", action="store_true",
+                        help="Enable OpenTelemetry tracing with console summary")
+    parser.add_argument("--langfuse", action="store_true",
+                        help="Export traces to Langfuse (requires LANGFUSE_*_KEY env vars)")
 
     args = parser.parse_args()
 
@@ -112,10 +111,11 @@ def parse_args() -> Config:
         enable_llm=not args.no_llm,
         llm_model=args.llm_model,
         ollama_url=args.ollama_url,
-        enable_qc=args.qc,
-        whisper_model=args.whisper_model,
         pronunciation_file=args.pronunciation,
-        upload_gdrive=args.upload,
+        enable_vision=args.vision,
+        vision_model=args.vision_model,
+        enable_tracing=args.tracing,
+        enable_langfuse=args.langfuse, 
     )
 
 
@@ -144,7 +144,7 @@ def _safe_title(title: str) -> str:
 
 
 class Pipeline:
-    """Orchestrates the 7-phase EPUB → audiobook conversion.
+    """Orchestrates the 6-phase EPUB → audiobook conversion.
 
     State (chapters, wav_results, manifest_chapters, etc.) is held on the
     instance so that phase methods can communicate without parameter chains.
@@ -174,24 +174,34 @@ class Pipeline:
     def run(self) -> dict:
         """Execute the full pipeline. Returns a summary dict for printing."""
         self.start_time = time.time()
+
+        if self.config.enable_tracing:
+            from datapizza.tracing import ContextTracing
+            trace_name = f"epub2audio_{self.config.epub_path.stem}"
+            with ContextTracing().trace(trace_name):
+                self._run_phases()
+        else:
+            self._run_phases()
+
+        return self._build_summary()
+
+    def _run_phases(self):
+        """Internal: execute pipeline phases in order. Wrapped by tracing in run()."""
         self.phase1_extract()
         self.phase2_enrich()
         self.phase3_clean_and_chunk()
         if self.config.dry_run:
             self._print_dry_run_stats()
-            return self._build_summary()
+            return
         self.phase4_synthesize()
         self.phase5_assemble()
         self.phase6_companion()
-        self.phase7_qc()
         self._cleanup()
         self._write_manifest()
-        self._handle_upload()
-        return self._build_summary()
 
     # ----- Phase methods (filled step-by-step) -----
     def phase1_extract(self):
-        logger.info("[Phase 1/7] Extracting chapters from %s", self.config.epub_path.name)
+        logger.info("[Phase 1/6] Extracting chapters from %s", self.config.epub_path.name)
         with self._timed("extract"):
             self.all_chapters = extract_chapters(self.config.epub_path, self.config.assets_dir)
             self.cover_art = extract_cover(self.config.epub_path)
@@ -216,28 +226,45 @@ class Pipeline:
             if self.config.chapters:
                 self.chapters = [ch for ch in self.all_chapters if ch.number in self.config.chapters]
                 logger.info(
-                    "[Phase 1/7] Processing %d/%d chapters: %s",
+                    "[Phase 1/6] Processing %d/%d chapters: %s",
                     len(self.chapters), len(self.all_chapters), self.config.chapters,
                 )
 
             self.total_chapters = len(self.all_chapters)
         logger.info(
-            "[Phase 1/7] Extracted %d chapters (%d selected)",
+            "[Phase 1/6] Extracted %d chapters (%d selected)",
             len(self.all_chapters), len(self.chapters),
         )
 
     def phase2_enrich(self):
         if not self.config.enable_llm:
-            logger.info("[Phase 2/7] LLM enrichment skipped (--no-llm)")
+            logger.info("[Phase 2/6] LLM enrichment skipped (--no-llm)")
             return
-        logger.info("[Phase 2/7] LLM enrichment with Ollama...")
+
+        vision_status = "with vision" if self.config.enable_vision else "text-only"
+        logger.info("[Phase 2/6] LLM enrichment (%s)...", vision_status)
+
         with self._timed("llm"):
             try:
-                from pipeline.llm_enricher import LLMEnricher
-                enricher = LLMEnricher(
-                    model=self.config.llm_model,
+                import os
+                from pipeline.enricher import Enricher
+                from pipeline.file_cache import FileCache
+
+                vision_api_key = os.getenv("OPENROUTER_API_KEY") if self.config.enable_vision else None
+                if self.config.enable_vision and not vision_api_key:
+                    logger.warning(
+                        "--vision requested but OPENROUTER_API_KEY env var not set; "
+                        "falling back to text-only enrichment"
+                    )
+
+                enricher = Enricher(
                     ollama_url=self.config.ollama_url,
-                    cache_dir=self.config.llm_cache_dir,
+                    ollama_model=self.config.llm_model,
+                    cache=FileCache(self.config.llm_cache_dir),
+                    vision_enabled=self.config.enable_vision and bool(vision_api_key),
+                    vision_api_key=vision_api_key,
+                    vision_base_url=self.config.vision_base_url,
+                    vision_model=self.config.vision_model,
                 )
                 if enricher.available:
                     for chapter in self.chapters:
@@ -246,13 +273,13 @@ class Pipeline:
                     logger.info("LLM enrichment complete, model unloaded")
                 else:
                     logger.warning("Ollama not available, skipping LLM enrichment")
-            except ImportError:
-                logger.warning("llm_enricher not available, skipping LLM enrichment")
+            except ImportError as e:
+                logger.warning("Enricher unavailable (%s), skipping LLM enrichment", e)
             except Exception as e:
                 logger.warning("LLM enrichment failed: %s, continuing without it", e)
 
     def phase3_clean_and_chunk(self):
-        logger.info("[Phase 3/7] Cleaning and chunking text...")
+        logger.info("[Phase 3/6] Cleaning and chunking text...")
         with self._timed("clean_chunk"):
             self.chapter_data = []  # (chapter, clean_text, chunks, section_markers)
             for chapter in self.chapters:
@@ -264,14 +291,14 @@ class Pipeline:
                 chunks = chunk_text(clean_text, self.config.max_chunk_chars, section_markers)
                 self.chapter_data.append((chapter, clean_text, chunks, section_markers))
                 logger.info(
-                    "[Phase 3/7]  Ch %d: %d chars -> %d chunks",
+                    "[Phase 3/6]  Ch %d: %d chars -> %d chunks",
                     chapter.number,
                     len(clean_text),
                     len(chunks),
                 )
 
     def phase4_synthesize(self):
-        logger.info("[Phase 4/7] Synthesizing audio with Kokoro TTS...")
+        logger.info("[Phase 4/6] Synthesizing audio with Kokoro TTS...")
         with self._timed("synthesize"):
             synth = Synthesizer(
                 model_path=self.config.kokoro_model,
@@ -303,7 +330,7 @@ class Pipeline:
             logger.info("TTS complete, Kokoro unloaded")
 
     def phase5_assemble(self):
-        logger.info("[Phase 5/7] Assembling audio...")
+        logger.info("[Phase 5/6] Assembling audio...")
         with self._timed("assemble"):
             self.manifest_chapters = []
 
@@ -362,7 +389,7 @@ class Pipeline:
                 self.manifest_chapters.append(entry)
 
     def phase6_companion(self):
-        logger.info("[Phase 6/7] Generating companion documents...")
+        logger.info("[Phase 6/6] Generating companion documents...")
         with self._timed("companion"):
             for chapter, _, _, _ in self.chapter_data:
                 # Images and math PNGs are written to assets_dir during extraction;
@@ -380,14 +407,6 @@ class Pipeline:
                     audio_timestamps=audio_timestamps,
                 )
 
-    def phase7_qc(self):
-        if self.config.enable_qc:
-            logger.warning(
-                "Whisper quality check is deprecated and may be removed in future versions. "
-                "The phase is skipped, but the option remains for backward compatibility. "
-                "See README.md for details."
-            )
-
     # ----- Helpers (filled step-by-step) -----
     def _print_dry_run_stats(self):
         total_chars = sum(len(ct) for _, ct, _, _ in self.chapter_data)
@@ -402,7 +421,8 @@ class Pipeline:
         print(f"  Output:       {self.config.output_dir}")
         print(f"  Format:       {self.config.output_format}")
         print(f"  LLM:          {'enabled' if self.config.enable_llm else 'disabled'}")
-        print(f"  QC:           {'enabled' if self.config.enable_qc else 'disabled'}")
+        print(f"  Vision:       {'enabled' if self.config.enable_vision else 'disabled'}")
+        print(f"  Tracing:      {'enabled' if self.config.enable_tracing else 'disabled'}")
         print(f"{'='*60}")
         for ch, ct, chs, _ in self.chapter_data:
             print(f"  Ch {ch.number:2d}: {ch.title[:50]:50s} "
@@ -426,14 +446,6 @@ class Pipeline:
         self.manifest_path = self.config.output_dir / "manifest.json"
         self.manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False))
         logger.info("Manifest written to %s", self.manifest_path)
-
-    def _handle_upload(self):
-        if self.config.upload_gdrive:
-            logger.warning(
-                "Google Drive upload is deprecated and may be removed in future versions. "
-                "The feature is skipped, but the option remains for backward compatibility. "
-                "See README.md for details."
-            )
 
     def _build_summary(self) -> dict:
         elapsed = time.time() - self.start_time

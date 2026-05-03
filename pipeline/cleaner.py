@@ -142,26 +142,30 @@ def clean_chapter(
         body = soup
 
     # Build enrichment lookups from LLM-enriched chapter data (if provided).
-    # code_annotations: CodeBlock.number (1-based sequential) -> annotation text
+    # code_narrations: CodeBlock.number (1-based sequential) -> narration text
     # fig_desc_by_label: Figure.label string -> description text
     #   (keyed by label, not number, because the extractor skips figures without
     #    <img> tags while the cleaner does not — label matching is always safe)
     # table_narrations: Table.number (1-based sequential) -> narration text
     # chapter_intro: prepended before chapter body text
-    code_annotations: dict[int, str] = {}
+    code_narrations: dict[int, str] = {}
     fig_desc_by_label: dict[str, str] = {}
     table_narrations: dict[int, str] = {}
+    formula_narrations: dict[int, str] = {}
     chapter_intro: str = ""
     if chapter is not None:
         for cb in chapter.code_blocks:
             if cb.narration:
-                code_annotations[cb.number] = cb.narration
+                code_narrations[cb.number] = cb.narration
         for fig in chapter.figures:
             if fig.narration:
                 fig_desc_by_label[fig.label] = fig.narration
         for tbl in chapter.tables:
             if tbl.narration:
                 table_narrations[tbl.number] = tbl.narration
+        for formula in chapter.math_formulas:
+            if formula.narration:
+                formula_narrations[formula.number] = formula.narration
         chapter_intro = chapter.intro or ""
 
     # --- Phase 1: Remove invisible / unwanted elements ---
@@ -183,13 +187,13 @@ def clean_chapter(
     fig_counter = 0
     table_counter = 0
 
-    # Process code blocks: <pre> → annotation (if enriched) or generic reference
+    # Process code blocks: <pre> → narration (if enriched) or generic reference
     for pre in body.find_all("pre"):
         code_counter += 1
-        annotation = code_annotations.get(code_counter, "")
-        if annotation:
+        narration = code_narrations.get(code_counter, "")
+        if narration:
             replacement = (
-                f"\n\nCode example {code_counter}: {annotation} "
+                f"\n\nCode example {code_counter}: {narration} "
                 f"See the companion PDF for the full code.\n\n"
             )
         else:
@@ -199,14 +203,21 @@ def clean_chapter(
             )
         pre.replace_with(NavigableString(replacement))
 
-    # Process math: <math> → numbered reference
+    # Process math: <math> → LLM narration (if enriched) or numbered reference
     for math_tag in body.find_all("math"):
         math_counter += 1
-        replacement = (
-            f"The author presents a mathematical formula here, "
-            f"formula number {math_counter}. "
-            f"See the companion PDF for the notation."
-        )
+        narration = formula_narrations.get(math_counter, "")
+        if narration:
+            replacement = (
+                f"\n\nFormula number {math_counter}: {narration} "
+                f"See the companion PDF for the notation.\n\n"
+            )
+        else:
+            replacement = (
+                f"The author presents a mathematical formula here, "
+                f"formula number {math_counter}. "
+                f"See the companion PDF for the notation."
+            )
         math_tag.replace_with(NavigableString(replacement))
 
     # Process equation divs that may wrap math
