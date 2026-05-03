@@ -10,42 +10,46 @@ from xml.etree import ElementTree
 
 from bs4 import BeautifulSoup, Tag
 
+from pipeline.math_renderer import render_formula_to_png
+
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class Figure:
-    number: int           # Sequential within chapter (1-based)
+# TODO: Testare con EPUB di un'altra casa editrice per assicurarci che il parsing sia robusto a variazioni di struttura HTML.
+
+
+@dataclass(kw_only=True)
+class NarratedElement:
+    """Common base for any chapter element that may carry an LLM narration
+    and optionally a pre-rendered visual asset on disk."""
+    number: int                        # 1-based sequential per element type
+    context: str                       # last heading before this element
+    dom_position: int                  # position in DOM order
+    narration: str = ""                # LLM-generated description (filled by enricher)
+    rendered_path: Path | None = None  # PNG asset for vision enrichment
+
+
+@dataclass(kw_only=True)
+class Figure(NarratedElement):
     label: str            # "Figure 1-1" (from <span class="label">)
-    src: str              # "assets/gaid_0101.png"
     alt: str              # Alt text from <img>
     caption: str          # Full caption text
-    context: str          # Last heading before this figure
-    dom_position: int = 0 # Position in DOM order among all visual elements
 
 
-@dataclass
-class CodeBlock:
-    number: int           # Sequential within chapter (1-based)
+@dataclass(kw_only=True)
+class CodeBlock(NarratedElement):
     language: str         # From data-code-language attribute, "" if unknown
     code: str             # Raw text content (tags stripped)
-    context: str          # Last heading before this code block
-    annotation: str = ""  # LLM-generated description (filled by llm_enricher)
-    dom_position: int = 0 # Position in DOM order among all visual elements
 
 
-@dataclass
-class MathFormula:
-    number: int           # Sequential within chapter (1-based)
+@dataclass(kw_only=True)
+class MathFormula(NarratedElement):
     alttext: str          # From alttext attribute
     mathml: str           # Raw MathML markup
-    context: str          # Last heading before this formula
-    dom_position: int = 0 # Position in DOM order among all visual elements
 
 
-@dataclass
-class Table:
-    number: int           # Sequential within chapter (1-based)
+@dataclass(kw_only=True)
+class Table(NarratedElement):
     label: str            # "Table 1-1" if labeled
     caption: str          # Caption text
     html: str             # Raw HTML of the table
@@ -53,9 +57,6 @@ class Table:
     rows: list[list[str]] = field(default_factory=list)
     row_count: int = 0
     col_count: int = 0
-    context: str = ""     # Last heading before this table
-    narration: str = ""   # LLM-generated narration (filled by llm_enricher)
-    dom_position: int = 0
 
 
 @dataclass
@@ -71,14 +72,25 @@ class Chapter:
     filename: str         # "ch01.html"
     title: str            # From <h1>
     raw_html: str         # Full HTML content
-    figures: list[Figure] = field(default_factory=list)
-    code_blocks: list[CodeBlock] = field(default_factory=list)
-    math_formulas: list[MathFormula] = field(default_factory=list)
-    tables: list[Table] = field(default_factory=list)
+    elements: list[NarratedElement] = field(default_factory=list)
     sections: list[Section] = field(default_factory=list)
-    images: dict[str, bytes] = field(default_factory=dict)  # src -> image data
     intro: str = ""       # LLM-generated intro (filled by llm_enricher)
-    figure_descriptions: dict[int, str] = field(default_factory=dict)  # fig_number -> description
+
+    @property
+    def figures(self) -> list["Figure"]:
+        return [e for e in self.elements if isinstance(e, Figure)]
+
+    @property
+    def code_blocks(self) -> list["CodeBlock"]:
+        return [e for e in self.elements if isinstance(e, CodeBlock)]
+
+    @property
+    def math_formulas(self) -> list["MathFormula"]:
+        return [e for e in self.elements if isinstance(e, MathFormula)]
+
+    @property
+    def tables(self) -> list["Table"]:
+        return [e for e in self.elements if isinstance(e, Table)]
 
 
 def _get_current_heading(tag: Tag) -> str:
@@ -130,6 +142,8 @@ def _extract_table(element: Tag, counter: int, context: str, dom_pos: int) -> Ta
 
     return Table(
         number=counter,
+        context=context,
+        dom_position=dom_pos,
         label=label,
         caption=caption,
         html=str(element),
@@ -137,20 +151,24 @@ def _extract_table(element: Tag, counter: int, context: str, dom_pos: int) -> Ta
         rows=rows,
         row_count=len(rows),
         col_count=len(headers) if headers else (len(rows[0]) if rows else 0),
-        context=context,
-        dom_position=dom_pos,
     )
 
 
 def _extract_all_elements(
     soup: BeautifulSoup,
-) -> tuple[list[Figure], list[CodeBlock], list[MathFormula], list[Table], list[Section]]:
-    """Extract all structured elements in DOM order."""
-    figures = []
-    code_blocks = []
-    math_formulas = []
-    tables = []
-    sections = []
+) -> tuple[list[NarratedElement], list[Section], list[tuple[Figure, str]]]:
+    """Extract all structured elements in DOM order.
+
+    Returns:
+        elements: single list of NarratedElement subclasses, sorted by DOM order
+        sections: list of Section objects
+        figure_srcs: list of (Figure, epub_relative_src) tuples — the src is
+            kept as a side-channel only so _extract_chapter can read the image
+            bytes from the EPUB zip, then it is discarded.
+    """
+    elements: list[NarratedElement] = []
+    sections: list[Section] = []
+    figure_srcs: list[tuple[Figure, str]] = []
 
     fig_counter = 0
     code_counter = 0
@@ -194,27 +212,28 @@ def _extract_all_elements(
             if not label:
                 label = f"Figure {fig_counter}"
 
-            figures.append(Figure(
+            fig = Figure(
                 number=fig_counter,
-                label=label,
-                src=src,
-                alt=alt,
-                caption=caption,
                 context=context,
                 dom_position=dom_pos,
-            ))
+                label=label,
+                alt=alt,
+                caption=caption,
+            )
+            elements.append(fig)
+            figure_srcs.append((fig, src))
 
         elif element.name == "pre":
             code_counter += 1
             code = element.get_text()
             language = element.get("data-code-language", "")
 
-            code_blocks.append(CodeBlock(
+            elements.append(CodeBlock(
                 number=code_counter,
-                language=language,
-                code=code,
                 context=context,
                 dom_position=dom_pos,
+                language=language,
+                code=code,
             ))
 
         elif element.name == "math":
@@ -222,27 +241,31 @@ def _extract_all_elements(
             alttext = element.get("alttext", "")
             mathml = str(element)
 
-            math_formulas.append(MathFormula(
+            elements.append(MathFormula(
                 number=math_counter,
-                alttext=alttext,
-                mathml=mathml,
                 context=context,
                 dom_position=dom_pos,
+                alttext=alttext,
+                mathml=mathml,
             ))
 
         elif element.name == "table":
             table_counter += 1
-            tables.append(_extract_table(element, table_counter, context, dom_pos))
+            elements.append(_extract_table(element, table_counter, context, dom_pos))
 
-    return figures, code_blocks, math_formulas, tables, sections
+    return elements, sections, figure_srcs
 
 
 def _extract_chapter(
     zf: zipfile.ZipFile,
     chapter_file: str,
     chapter_number: int,
+    assets_dir: Path,
 ) -> Chapter:
-    """Parse a single chapter HTML file from the EPUB ZIP."""
+    """Parse a single chapter HTML file from the EPUB ZIP.
+
+    Side effects: writes figure images and rendered math PNGs under assets_dir.
+    """
     html = zf.read(chapter_file).decode("utf-8")
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", category=UserWarning)
@@ -264,22 +287,46 @@ def _extract_chapter(
     filename = chapter_file.split("/")[-1]
 
     # Extract all structured elements in DOM order
-    figures, code_blocks, math_formulas, tables, sections = _extract_all_elements(soup)
+    elements, sections, figure_srcs = _extract_all_elements(soup)
 
-    # Extract image data from ZIP
-    images = {}
-    for fig in figures:
-        img_path = f"OEBPS/{fig.src}" if not fig.src.startswith("OEBPS/") else fig.src
+    # Write figure images from EPUB zip to disk; populate Figure.rendered_path
+    for fig, src in figure_srcs:
+        if not src:
+            continue
+        img_path = src if src.startswith("OEBPS/") else f"OEBPS/{src}"
         try:
-            images[fig.src] = zf.read(img_path)
+            img_bytes = zf.read(img_path)
         except KeyError:
-            logger.warning(f"Image not found in EPUB: {img_path}")
+            logger.warning("Image not found in EPUB: %s", img_path)
+            continue
+        out_path = assets_dir / Path(src).name
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_bytes(img_bytes)
+        fig.rendered_path = out_path
+
+    # Pre-render MathML formulas to PNG; populate MathFormula.rendered_path
+    math_dir = assets_dir / "math"
+    for elem in elements:
+        if isinstance(elem, MathFormula):
+            out_path = math_dir / f"ch{chapter_number:02d}_math{elem.number:02d}.png"
+            if render_formula_to_png(elem.mathml, out_path):
+                elem.rendered_path = out_path
+
+    # Counts (preserved log format for diff stability)
+    fig_count = sum(1 for e in elements if isinstance(e, Figure))
+    code_count = sum(1 for e in elements if isinstance(e, CodeBlock))
+    math_count = sum(1 for e in elements if isinstance(e, MathFormula))
+    table_count = sum(1 for e in elements if isinstance(e, Table))
 
     logger.info(
-        f"Chapter {chapter_number}: {title} — "
-        f"{len(figures)} fig, {len(code_blocks)} code, "
-        f"{len(math_formulas)} math, {len(tables)} tables, "
-        f"{len(sections)} sections"
+        "Chapter %s: %s — %d fig, %d code, %d math, %d tables, %d sections",
+        chapter_number,
+        title,
+        fig_count,
+        code_count,
+        math_count,
+        table_count,
+        len(sections),
     )
 
     return Chapter(
@@ -287,17 +334,16 @@ def _extract_chapter(
         filename=filename,
         title=title,
         raw_html=html,
-        figures=figures,
-        code_blocks=code_blocks,
-        math_formulas=math_formulas,
-        tables=tables,
+        elements=elements,
         sections=sections,
-        images=images,
     )
 
 
-def extract_chapters(epub_path: Path) -> list[Chapter]:
-    """Extract all chapters from an EPUB file."""
+def extract_chapters(epub_path: Path, assets_dir: Path) -> list[Chapter]:
+    """Extract all chapters from an EPUB file.
+
+    Writes figure images and rendered math PNGs under assets_dir.
+    """
     chapters = []
 
     with zipfile.ZipFile(epub_path, "r") as zf:
@@ -309,14 +355,14 @@ def extract_chapters(epub_path: Path) -> list[Chapter]:
         if not chapter_files:
             raise ValueError(f"No chapter files found in {epub_path}")
 
-        logger.info(f"Found {len(chapter_files)} chapters in {epub_path.name}")
+        logger.info("Found %d chapters in %s", len(chapter_files), epub_path.name)
 
         for ch_file in chapter_files:
             match = re.search(r"ch(\d+)", ch_file)
             if not match:
                 continue
             ch_num = int(match.group(1))
-            chapter = _extract_chapter(zf, ch_file, ch_num)
+            chapter = _extract_chapter(zf, ch_file, ch_num, assets_dir)
             chapters.append(chapter)
 
     return chapters

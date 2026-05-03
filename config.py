@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -35,12 +35,8 @@ class Config:
     # Companion output
     companion_format: str = "both"   # "pdf", "html", "both"
 
-    # Quality check
-    enable_qc: bool = False
-    whisper_model: str = "medium"
-
     # Processing
-    max_chunk_chars: int = 3500
+    max_chunk_chars: int = 2500
     chapters: list[int] | None = None  # None = all
     force: bool = False
     dry_run: bool = False
@@ -48,9 +44,20 @@ class Config:
     # Pronunciation
     pronunciation_file: str = "pronunciation.json"
 
-    # Upload
-    upload_gdrive: bool = False
-    gdrive_folder: str = "Audiobooks"
+    # LLM enrichment
+    enable_llm: bool = True
+    llm_model: str = "qwen3:8b"
+    ollama_url: str = "http://localhost:11434"
+
+    # Vision enrichment (NEW)
+    enable_vision: bool = False
+    vision_model: str = "google/gemini-2.5-flash"
+    vision_base_url: str = "https://openrouter.ai/api/v1"
+    # La API key NON viene messa in Config: si legge da OPENROUTER_API_KEY env var
+
+    # Observability (NEW)
+    enable_tracing: bool = False
+    enable_langfuse: bool = False
 
     # Derived paths
     @property
