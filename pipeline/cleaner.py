@@ -13,7 +13,7 @@ import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
-from bs4 import BeautifulSoup, NavigableString, Tag
+from bs4 import BeautifulSoup, NavigableString
 
 logger = logging.getLogger(__name__)
 

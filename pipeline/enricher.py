@@ -12,8 +12,6 @@ FileCache backend. Tracing is automatic via OpenTelemetry spans.
 """
 
 import logging
-import os
-from pathlib import Path
 
 import requests
 
